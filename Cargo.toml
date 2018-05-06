@@ -1,0 +1,6 @@
+[package]
+name = "ruspt"
+version = "0.1.0"
+authors = ["Masayuki Takeda <mtakeda.enigsol@gmail.com>"]
+
+[dependencies]

@@ -24,7 +24,7 @@ pub fn init_xorshift(seed: u32) -> Seed {
     let mut s = seed;
     let mut ret = [0; 4];
     for i in 0..4 {
-        s = 1812433253 * (s ^ (s >> 30)) + i as u32;
+        s = 1812433253 * (s ^ (s >> 30)) + i as u32 + 1;
         ret[i] = s;
     }
     ret
@@ -157,16 +157,17 @@ pub struct Sphere {
     reflection: Reflection,
 }
 
+const EPSILON: f64 = 1e-6;
+
 impl Sphere {
     pub fn intersect(&self, ray: &Ray) -> Option<Intersection> {
-        use std::f64::EPSILON;
         // A ray intersects with a sphere iff
         // (self.center - (ray.org + ray.dir * t))^2 =< self.radius^2
         // which means checking whether the discriminant is positive
         // for the quadratic formular for t is sufficient.
-        let p_0 = self.center - ray.org;
-        let b = p_0.dot(&ray.dir);
-        let d4 = b * b - p_0.dot(&p_0) + self.radius * self.radius;
+        let p_o = self.center - ray.org;
+        let b = p_o.dot(&ray.dir);
+        let d4 = b * b - p_o.dot(&p_o) + self.radius * self.radius;
 
         if d4 < 0.0 {
             None
@@ -179,7 +180,7 @@ impl Sphere {
             } else {
                 let distance = if t1 > EPSILON { t1 } else { t2 };
                 let position = ray.org + ray.dir * distance;
-                let normal = position - self.center;
+                let normal = (position - self.center).normalize();
                 Some(Intersection {
                     distance,
                     normal,
@@ -290,7 +291,6 @@ const KDEPTH_LIMIT: i32 = 64;
 
 pub fn radiance(ray: &Ray, seed: Seed, depth: i32) -> (Color, Seed) {
     use std::f64::consts::PI;
-    use std::f64::EPSILON;
     match intersect_scene(ray) {
         None => (V(0.0, 0.0, 0.0), seed), // return background color
         Some(IntersectionWithID {
@@ -342,7 +342,8 @@ pub fn radiance(ray: &Ray, seed: Seed, depth: i32) -> (Color, Seed) {
                     seed = res.1;
                     let r2 = res.0;
                     let r2_sq = r2.sqrt();
-                    let dir = u * r1.cos() * r2_sq + v * r1.sin() * r2_sq + w * (1.0 - r2).sqrt();
+                    let dir = (u * r1.cos() * r2_sq + v * r1.sin() * r2_sq + w * (1.0 - r2).sqrt())
+                        .normalize();
                     let res = radiance(
                         &Ray {
                             org: intersection.position,
@@ -399,7 +400,7 @@ pub fn radiance(ray: &Ray, seed: Seed, depth: i32) -> (Color, Seed) {
 
                         let a = nt - nc;
                         let b = nt + nc;
-                        let r0 = a * a / b * b;
+                        let r0 = (a * a) / (b * b);
                         let c = 1.0 - (if into {
                             -ddn
                         } else {
@@ -468,6 +469,7 @@ pub fn render(width: usize, height: usize, samples: usize, supersamples: usize) 
         height,
         samples * supersamples * supersamples
     );
+
     for y in 0..height {
         println!(
             "Rendering (y = {}) {}%",

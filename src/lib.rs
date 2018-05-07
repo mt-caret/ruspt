@@ -52,7 +52,7 @@ pub fn save_ppm_file(filename: &str, image: &[Color], width: usize, height: usiz
     assert_eq!(image.iter().len(), width * height);
     let mut f = fs::File::create(filename).expect("File creation failed.");
     write!(f, "P3\n{} {}\n{}\n", width, height, 255).expect("Write failed.");
-    image.iter().for_each(|pixel| {
+    image.iter().rev().for_each(|pixel| {
         write!(
             f,
             "{} {} {} ",

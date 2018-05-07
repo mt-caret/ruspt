@@ -1,3 +1,6 @@
+extern crate rayon;
+use rayon::prelude::*;
+
 use std::ops;
 
 type Seed = [u32; 4];
@@ -48,11 +51,11 @@ pub fn to_u8(x: f64) -> u8 {
 
 pub fn save_ppm_file(filename: &str, image: &[Color], width: usize, height: usize) {
     use std::fs;
-    use std::io::Write;
+    use std::io::{BufWriter, Write};
     assert_eq!(image.iter().len(), width * height);
-    let mut f = fs::File::create(filename).expect("File creation failed.");
+    let mut f = BufWriter::new(fs::File::create(filename).expect("File creation failed."));
     write!(f, "P3\n{} {}\n{}\n", width, height, 255).expect("Write failed.");
-    image.iter().rev().for_each(|pixel| {
+    image.iter().for_each(|pixel| {
         write!(
             f,
             "{} {} {} ",
@@ -157,10 +160,9 @@ pub struct Sphere {
     reflection: Reflection,
 }
 
-const EPSILON: f64 = 1e-6;
-
 impl Sphere {
     pub fn intersect(&self, ray: &Ray) -> Option<Intersection> {
+        use std::f64::EPSILON;
         // A ray intersects with a sphere iff
         // (self.center - (ray.org + ray.dir * t))^2 =< self.radius^2
         // which means checking whether the discriminant is positive
@@ -291,6 +293,7 @@ const KDEPTH_LIMIT: i32 = 64;
 
 pub fn radiance(ray: &Ray, seed: Seed, depth: i32) -> (Color, Seed) {
     use std::f64::consts::PI;
+    use std::f64::EPSILON;
     match intersect_scene(ray) {
         None => (V(0.0, 0.0, 0.0), seed), // return background color
         Some(IntersectionWithID {
@@ -462,7 +465,7 @@ pub fn render(width: usize, height: usize, samples: usize, supersamples: usize) 
     let screen_y = screen_x.cross(&camera_dir).normalize() * screen_height;
     let screen_center = camera_position + camera_dir * screen_dist;
 
-    let mut image = vec![V(0.0, 0.0, 0.0); width * height];
+    //let mut image = vec![V(0.0, 0.0, 0.0); width * height];
     println!(
         "{}x{} {} spp",
         width,
@@ -470,44 +473,44 @@ pub fn render(width: usize, height: usize, samples: usize, supersamples: usize) 
         samples * supersamples * supersamples
     );
 
-    for y in 0..height {
-        println!(
-            "Rendering (y = {}) {}%",
-            y,
-            100.0 * y as f64 / (height - 1) as f64
-        );
+    let image: Vec<_> = (0..height)
+        .into_par_iter()
+        .flat_map(|y| {
+            println!("Rendering (y = {})", y);
 
-        let mut seed = init_xorshift(y as u32 + 1);
-        for x in 0..width {
-            let image_index = (height - y - 1) * width + x;
-            for sy in 0..supersamples {
-                for sx in 0..supersamples {
-                    let mut accum = V(0.0, 0.0, 0.0);
-                    for _ in 0..samples {
-                        let rate = 1.0 / supersamples as f64;
-                        let r1 = sx as f64 * rate + rate / 2.0;
-                        let r2 = sy as f64 * rate + rate / 2.0;
-                        let screen_position = screen_center
-                            + screen_x * ((r1 + x as f64) / width as f64 - 0.5)
-                            + screen_y * ((r2 + y as f64) / height as f64 - 0.5);
-                        let dir = (screen_position - camera_position).normalize();
+            (0..width).into_par_iter().map(move |x| {
+                let mut seed = init_xorshift((y * width + x) as u32 + 1);
+                let mut ret = V(0.0, 0.0, 0.0);
+                for sy in 0..supersamples {
+                    for sx in 0..supersamples {
+                        let mut accum = V(0.0, 0.0, 0.0);
+                        for _ in 0..samples {
+                            let rate = 1.0 / supersamples as f64;
+                            let r1 = sx as f64 * rate + rate / 2.0;
+                            let r2 = sy as f64 * rate + rate / 2.0;
+                            let screen_position = screen_center
+                                + screen_x * ((r1 + x as f64) / width as f64 - 0.5)
+                                + screen_y * ((r2 + y as f64) / height as f64 - 0.5);
+                            let dir = (screen_position - camera_position).normalize();
 
-                        let res = radiance(
-                            &Ray {
-                                org: camera_position,
-                                dir,
-                            },
-                            seed,
-                            0,
-                        );
-                        seed = res.1;
-                        accum = accum + res.0 / (samples * supersamples * supersamples) as f64;
+                            let res = radiance(
+                                &Ray {
+                                    org: camera_position,
+                                    dir,
+                                },
+                                seed,
+                                0,
+                            );
+                            seed = res.1;
+                            accum = accum + res.0 / (samples * supersamples * supersamples) as f64;
+                        }
+                        ret = ret + accum;
                     }
-                    image[image_index] = image[image_index] + accum;
                 }
-            }
-        }
-    }
+                ret
+            })
+        })
+        .collect();
 
     save_ppm_file("image.ppm", &image, width, height);
 }

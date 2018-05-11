@@ -3,34 +3,34 @@ use rayon::prelude::*;
 
 use std::ops;
 
-type Seed = [u32; 4];
+pub struct Rand([u32; 4]);
 
-pub fn next(seed: Seed) -> (u32, Seed) {
-    let t = seed[0] ^ (seed[0] << 11);
-    (
-        seed[3],
-        [
-            seed[1],
-            seed[2],
-            seed[3],
-            (seed[3] ^ (seed[3] >> 19)) ^ (t ^ (t >> 8)),
-        ],
-    )
-}
-
-pub fn next01(seed: Seed) -> (f64, Seed) {
-    let (res, next_seed) = next(seed);
-    (res as f64 / ::std::u32::MAX as f64, next_seed)
-}
-
-pub fn init_xorshift(seed: u32) -> Seed {
-    let mut s = seed;
-    let mut ret = [0; 4];
-    for i in 0..4 {
-        s = 1812433253 * (s ^ (s >> 30)) + i as u32 + 1;
-        ret[i] = s;
+// XorShift
+impl Rand {
+    pub fn new(seed: u32) -> Rand {
+        let mut s = seed;
+        let mut ret = [0; 4];
+        for i in 0..4 {
+            s = 1812433253 * (s ^ (s >> 30)) + i as u32 + 1;
+            ret[i] = s;
+        }
+        Rand(ret)
     }
-    ret
+
+    pub fn next(&mut self) -> u32 {
+        let t = self.0[0] ^ (self.0[0] << 11);
+        self.0 = [
+            self.0[1],
+            self.0[2],
+            self.0[3],
+            (self.0[3] ^ (self.0[3] >> 19)) ^ (t ^ (t >> 8)),
+        ];
+        self.0[2]
+    }
+
+    pub fn next01(&mut self) -> f64 {
+        self.next() as f64 / ::std::u32::MAX as f64
+    }
 }
 
 pub fn clamp(x: f64) -> f64 {
@@ -147,11 +147,6 @@ pub struct Intersection {
     position: V,
 }
 
-pub struct IntersectionWithID {
-    intersection: Intersection,
-    object_id: usize,
-}
-
 pub struct Sphere {
     radius: f64,
     center: V,
@@ -266,21 +261,18 @@ pub static SPHERES: [Sphere; 10] = [
     }, // Light
 ];
 
-pub fn intersect_scene(ray: &Ray) -> Option<IntersectionWithID> {
+pub fn intersect_scene(ray: &Ray) -> Option<(Intersection, usize)> {
     use std::cmp::Ordering::{Greater, Less};
     (0..10)
         .filter_map(|i| {
             SPHERES[i]
                 .intersect(ray)
-                .map(|intersection| IntersectionWithID {
-                    intersection,
-                    object_id: i,
-                })
+                .map(|intersection| (intersection, i))
         })
         .min_by(|x, y| {
             // iffish floating point comparison
             // TODO: check if this actually *is* the correct thing to do
-            if x.intersection.distance < y.intersection.distance {
+            if x.0.distance < y.0.distance {
                 Less
             } else {
                 Greater
@@ -291,17 +283,12 @@ pub fn intersect_scene(ray: &Ray) -> Option<IntersectionWithID> {
 const KDEPTH: i32 = 5;
 const KDEPTH_LIMIT: i32 = 64;
 
-pub fn radiance(ray: &Ray, seed: Seed, depth: i32) -> (Color, Seed) {
+pub fn radiance(ray: &Ray, rand: &mut Rand, depth: i32) -> Color {
     use std::f64::consts::PI;
     use std::f64::EPSILON;
     match intersect_scene(ray) {
-        None => (V(0.0, 0.0, 0.0), seed), // return background color
-        Some(IntersectionWithID {
-            intersection,
-            object_id,
-        }) => {
-            let mut seed = seed;
-
+        None => V(0.0, 0.0, 0.0), // return background color
+        Some((intersection, object_id)) => {
             let current_object = &SPHERES[object_id];
             let orienting_normal = if intersection.normal.dot(&ray.dir) < 0.0 {
                 intersection.normal
@@ -320,10 +307,8 @@ pub fn radiance(ray: &Ray, seed: Seed, depth: i32) -> (Color, Seed) {
                 };
 
             if depth > KDEPTH {
-                let res = next01(seed);
-                seed = res.1;
-                if res.0 >= russian_roulette_probability {
-                    return (current_object.emission, seed);
+                if rand.next01() >= russian_roulette_probability {
+                    return current_object.emission;
                 }
             } else {
                 russian_roulette_probability = 1.0;
@@ -338,39 +323,35 @@ pub fn radiance(ray: &Ray, seed: Seed, depth: i32) -> (Color, Seed) {
                         V(1.0, 0.0, 0.0).cross(&w).normalize()
                     };
                     let v = w.cross(&u);
-                    let res = next01(seed);
-                    seed = res.1;
-                    let r1 = 2.0 * PI * res.0;
-                    let res = next01(seed);
-                    seed = res.1;
-                    let r2 = res.0;
+                    let r1 = 2.0 * PI * rand.next01();
+                    let r2 = rand.next01();
                     let r2_sq = r2.sqrt();
                     let dir = (u * r1.cos() * r2_sq + v * r1.sin() * r2_sq + w * (1.0 - r2).sqrt())
                         .normalize();
-                    let res = radiance(
-                        &Ray {
-                            org: intersection.position,
-                            dir,
-                        },
-                        seed,
-                        depth + 1,
-                    );
-                    seed = res.1;
-                    (res.0, current_object.color / russian_roulette_probability)
+                    (
+                        radiance(
+                            &Ray {
+                                org: intersection.position,
+                                dir,
+                            },
+                            rand,
+                            depth + 1,
+                        ),
+                        current_object.color / russian_roulette_probability,
+                    )
                 }
-                Reflection::Specular => {
-                    let res = radiance(
+                Reflection::Specular => (
+                    radiance(
                         &Ray {
                             org: intersection.position,
                             dir: ray.dir
                                 - intersection.normal * 2.0 * intersection.normal.dot(&ray.dir),
                         },
-                        seed,
+                        rand,
                         depth + 1,
-                    );
-                    seed = res.1;
-                    (res.0, current_object.color / russian_roulette_probability)
-                }
+                    ),
+                    current_object.color / russian_roulette_probability,
+                ),
                 Reflection::Refraction => {
                     let reflection_ray = Ray {
                         org: intersection.position,
@@ -386,9 +367,10 @@ pub fn radiance(ray: &Ray, seed: Seed, depth: i32) -> (Color, Seed) {
                     let cos2t = 1.0 - nnt * nnt * (1.0 - ddn * ddn);
 
                     if cos2t < 0.0 {
-                        let res = radiance(&reflection_ray, seed, depth + 1);
-                        seed = res.1;
-                        (res.0, current_object.color / russian_roulette_probability)
+                        (
+                            radiance(&reflection_ray, rand, depth + 1),
+                            current_object.color / russian_roulette_probability,
+                        )
                     } else {
                         let refraction_ray = Ray {
                             org: intersection.position,
@@ -415,39 +397,30 @@ pub fn radiance(ray: &Ray, seed: Seed, depth: i32) -> (Color, Seed) {
 
                         let probability = 0.25 + 0.5 * re;
                         if depth > 2 {
-                            let res = next01(seed);
-                            seed = res.1;
-                            if res.0 < probability {
-                                let res = radiance(&reflection_ray, seed, depth + 1);
-                                seed = res.1;
+                            if rand.next01() < probability {
                                 (
-                                    res.0 * re,
+                                    radiance(&reflection_ray, rand, depth + 1) * re,
                                     current_object.color
                                         / (probability * russian_roulette_probability),
                                 )
                             } else {
-                                let res = radiance(&refraction_ray, seed, depth + 1);
-                                seed = res.1;
                                 (
-                                    res.0 * tr,
+                                    radiance(&refraction_ray, rand, depth + 1) * tr,
                                     current_object.color
                                         / ((1.0 - probability) * russian_roulette_probability),
                                 )
                             }
                         } else {
-                            let res1 = radiance(&reflection_ray, seed, depth + 1);
-                            seed = res1.1;
-                            let res2 = radiance(&refraction_ray, seed, depth + 1);
-                            seed = res2.1;
                             (
-                                res1.0 * re + res2.0 * tr,
+                                radiance(&reflection_ray, rand, depth + 1) * re
+                                    + radiance(&refraction_ray, rand, depth + 1) * tr,
                                 current_object.color / russian_roulette_probability,
                             )
                         }
                     }
                 }
             };
-            (current_object.emission + weight * incoming_radiance, seed)
+            current_object.emission + weight * incoming_radiance
         }
     }
 }
@@ -479,7 +452,7 @@ pub fn render(width: usize, height: usize, samples: usize, supersamples: usize) 
             println!("Rendering (y = {})", y);
 
             (0..width).into_par_iter().map(move |x| {
-                let mut seed = init_xorshift((y * width + x) as u32 + 1);
+                let mut rand = Rand::new((y * width + x) as u32 + 1);
                 let mut ret = V(0.0, 0.0, 0.0);
                 for sy in 0..supersamples {
                     for sx in 0..supersamples {
@@ -493,16 +466,16 @@ pub fn render(width: usize, height: usize, samples: usize, supersamples: usize) 
                                 + screen_y * ((r2 + y as f64) / height as f64 - 0.5);
                             let dir = (screen_position - camera_position).normalize();
 
-                            let res = radiance(
-                                &Ray {
-                                    org: camera_position,
-                                    dir,
-                                },
-                                seed,
-                                0,
-                            );
-                            seed = res.1;
-                            accum = accum + res.0 / (samples * supersamples * supersamples) as f64;
+                            accum = accum
+                                + radiance(
+                                    &Ray {
+                                        org: camera_position,
+                                        dir,
+                                    },
+                                    &mut rand,
+                                    0,
+                                )
+                                    / (samples * supersamples * supersamples) as f64;
                         }
                         ret = ret + accum;
                     }
